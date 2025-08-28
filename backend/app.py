@@ -458,6 +458,122 @@ def login():
     except Exception as e:
         return jsonify({'message': 'Login failed', 'error': str(e)}), 500
 
+# @app.route('/api/predict', methods=['POST'])
+# @token_required
+# def predict_spam(current_user):
+#     try:
+#         data = request.get_json()
+#         if not data or not data.get('message'):
+#             return jsonify({'error': 'No message provided'}), 400
+            
+#         message = data.get('message')
+#         message_type = data.get('type', 'email')
+
+#         preprocessor = MultiLanguagePreprocessor()
+#         language = preprocessor.detect_language(message)
+        
+#         indicators = {
+#             'spam_keywords': 0,
+#             'phone_numbers': 0,
+#             'money_mentions': 0,
+#             'urgent_words': 0,
+#             'urls': 0,
+#             'text_length': len(message)
+#         }
+        
+#         spam_score = 0
+#         message_lower = message.lower()
+
+#         # Get ML prediction
+#         ml_prediction, ml_confidence = predict_with_ml_model(message, language)
+        
+#         # Rule-based indicators
+#         spam_keywords = preprocessor.spam_keywords.get(language, [])
+#         for keyword in spam_keywords:
+#             if keyword.lower() in message_lower:
+#                 spam_score += 1
+#                 indicators['spam_keywords'] += 1
+
+#         # Phone patterns
+#         phone_patterns = {
+#             'bangla': [r'(\+?88)?[-\s]?01[3-9]\d{8}', r'\b\d{11}\b'],
+#             'spanish': [r'\+34\s?\d{9}', r'\b\d{9}\b', r'\b6\d{8}\b'],
+#             'english': [r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b']
+#         }
+        
+#         for pattern in phone_patterns.get(language, []):
+#             if re.search(pattern, message):
+#                 spam_score += 2
+#                 indicators['phone_numbers'] += 1
+#                 break
+
+#         # Money patterns
+#         money_patterns = {
+#             'bangla': [r'৳\s*[\d০-৯]+', r'[\d০-৯]+\s*(টাকা|হাজার|লক্ষ|কোটি)'],
+#             'spanish': [r'€\s*\d+', r'\d+\s*euros?', r'\d+\s*dólares?'],
+#             'english': [r'[$€£]\s*\d+', r'\d+\s*(?:dollars|euro|pound)']
+#         }
+        
+#         for pattern in money_patterns.get(language, []):
+#             if re.search(pattern, message_lower):
+#                 spam_score += 2
+#                 indicators['money_mentions'] += 1
+#                 break
+
+#         # Urgent words
+#         urgent_words = {
+#             'bangla': ['জরুরি', 'এখনই', 'তাড়াতাড়ি', 'দ্রুত'],
+#             'spanish': ['urgente', 'ahora', 'rápido', 'inmediatamente'],
+#             'english': ['urgent', 'now', 'hurry', 'immediately']
+#         }
+        
+#         for word in urgent_words.get(language, []):
+#             if word.lower() in message_lower:
+#                 spam_score += 1
+#                 indicators['urgent_words'] += 1
+
+#         # URLs
+#         if re.search(r'http[s]?://\S+', message):
+#             spam_score += 2
+#             indicators['urls'] += 1
+
+#         # Final decision
+#         if ml_prediction is not None:
+#             is_spam = ml_prediction
+#             confidence = ml_confidence
+#         else:
+#             is_spam = spam_score >= 3
+#             confidence = 0.85 if is_spam else 0.75
+
+#         result = {
+#             'isSpam': is_spam,
+#             'confidence': confidence,
+#             'message': 'Spam detected' if is_spam else 'Not spam',
+#             'language': language,
+#             'indicators': indicators
+#         }
+
+#         # Save to database
+#         try:
+#             conn = get_db_connection()
+#             if conn:
+#                 cursor = conn.cursor()
+#                 cursor.execute(
+#                     "INSERT INTO messages (user_id, content, type, language, is_spam, confidence, spam_indicators) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+#                     (current_user['id'], message, message_type, language, is_spam, confidence, json.dumps(indicators))
+#                 )
+#                 conn.commit()
+#                 cursor.close()
+#                 conn.close()
+#         except Exception as db_error:
+#             logger.error(f"Database error: {db_error}")
+
+#         return jsonify(result), 200
+
+#     except Exception as e:
+#         return jsonify({'error': 'Error detecting spam', 'details': str(e)}), 500
+# Add these new endpoints to your existing Flask app
+
 @app.route('/api/predict', methods=['POST'])
 @token_required
 def predict_spam(current_user):
@@ -550,29 +666,186 @@ def predict_spam(current_user):
             'confidence': confidence,
             'message': 'Spam detected' if is_spam else 'Not spam',
             'language': language,
-            'indicators': indicators
+            'indicators': indicators,
+            'type': message_type,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'originalMessage': message
         }
 
-        # Save to database
+        # Save to database with better error handling
+        saved_successfully = False
         try:
             conn = get_db_connection()
             if conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "INSERT INTO messages (user_id, content, type, language, is_spam, confidence, spam_indicators) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    (current_user['id'], message, message_type, language, is_spam, confidence, json.dumps(indicators))
+                    "INSERT INTO messages (user_id, content, type, language, is_spam, confidence, spam_indicators, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    (current_user['id'], message, message_type, language, is_spam, confidence, json.dumps(indicators), datetime.now(timezone.utc))
                 )
+                message_id = cursor.fetchone()
+                if message_id:
+                    result['id'] = message_id[0]
+                    saved_successfully = True
+                    logger.info(f"Message saved with ID: {message_id[0]}")
                 conn.commit()
                 cursor.close()
                 conn.close()
         except Exception as db_error:
-            logger.error(f"Database error: {db_error}")
+            logger.error(f"Database save error: {db_error}")
+            # Continue without database save
 
+        result['saved_to_db'] = saved_successfully
         return jsonify(result), 200
 
     except Exception as e:
+        logger.error(f"Prediction error: {e}")
         return jsonify({'error': 'Error detecting spam', 'details': str(e)}), 500
 
+# New endpoint to get user's detection history
+@app.route('/api/messages/history', methods=['GET'])
+@token_required
+def get_detection_history(current_user):
+    try:
+        # Get query parameters
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        filter_spam = request.args.get('spam_only', None)
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'error': 'Database unavailable', 'history': []}), 500
+            
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Build query based on filters
+        where_clause = "WHERE user_id = %s"
+        params = [current_user['id']]
+        
+        if filter_spam is not None:
+            where_clause += " AND is_spam = %s"
+            params.append(filter_spam.lower() == 'true')
+        
+        query = f"""
+            SELECT id, content, type, language, is_spam, confidence, 
+                   spam_indicators, created_at 
+            FROM messages 
+            {where_clause}
+            ORDER BY created_at DESC 
+            LIMIT %s OFFSET %s
+        """
+        params.extend([limit, offset])
+        
+        cursor.execute(query, params)
+        messages = cursor.fetchall()
+        
+        # Get total count
+        count_query = f"SELECT COUNT(*) FROM messages {where_clause}"
+        cursor.execute(count_query, params[:-2])  # Remove limit and offset
+        total_count = cursor.fetchone()['count']
+        
+        cursor.close()
+        conn.close()
+        
+        # Format messages for frontend
+        formatted_messages = []
+        for msg in messages:
+            formatted_messages.append({
+                'id': msg['id'],
+                'message': msg['content'],
+                'type': msg['type'],
+                'language': msg['language'],
+                'isSpam': msg['is_spam'],
+                'confidence': float(msg['confidence']),
+                'indicators': msg['spam_indicators'] or {},
+                'timestamp': msg['created_at'].isoformat() if msg['created_at'] else None
+            })
+        
+        return jsonify({
+            'history': formatted_messages,
+            'total': total_count,
+            'limit': limit,
+            'offset': offset
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error fetching history: {e}")
+        return jsonify({'error': 'Error fetching history', 'history': []}), 500
+
+# New endpoint to get detection statistics
+@app.route('/api/messages/stats', methods=['GET'])
+@token_required  
+def get_detection_stats(current_user):
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'error': 'Database unavailable'}), 500
+            
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get overall stats
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_messages,
+                COUNT(CASE WHEN is_spam THEN 1 END) as spam_count,
+                COUNT(CASE WHEN NOT is_spam THEN 1 END) as ham_count,
+                AVG(CASE WHEN is_spam THEN confidence ELSE NULL END) as avg_spam_confidence,
+                AVG(CASE WHEN NOT is_spam THEN confidence ELSE NULL END) as avg_ham_confidence
+            FROM messages 
+            WHERE user_id = %s
+        """, (current_user['id'],))
+        
+        overall_stats = cursor.fetchone()
+        
+        # Get stats by type
+        cursor.execute("""
+            SELECT 
+                type,
+                COUNT(*) as total,
+                COUNT(CASE WHEN is_spam THEN 1 END) as spam_count
+            FROM messages 
+            WHERE user_id = %s
+            GROUP BY type
+            ORDER BY total DESC
+        """, (current_user['id'],))
+        
+        type_stats = cursor.fetchall()
+        
+        # Get recent activity (last 7 days)
+        cursor.execute("""
+            SELECT 
+                DATE(created_at) as date,
+                COUNT(*) as total,
+                COUNT(CASE WHEN is_spam THEN 1 END) as spam_count
+            FROM messages 
+            WHERE user_id = %s 
+                AND created_at >= NOW() - INTERVAL '7 days'
+            GROUP BY DATE(created_at)
+            ORDER BY date DESC
+        """, (current_user['id'],))
+        
+        recent_activity = cursor.fetchall()
+        
+        cursor.close()
+        conn.close()
+        
+        # Format response
+        stats = {
+            'total_messages': overall_stats['total_messages'],
+            'spam_count': overall_stats['spam_count'], 
+            'ham_count': overall_stats['ham_count'],
+            'spam_rate': (overall_stats['spam_count'] / overall_stats['total_messages'] * 100) if overall_stats['total_messages'] > 0 else 0,
+            'avg_spam_confidence': float(overall_stats['avg_spam_confidence']) if overall_stats['avg_spam_confidence'] else 0,
+            'avg_ham_confidence': float(overall_stats['avg_ham_confidence']) if overall_stats['avg_ham_confidence'] else 0,
+            'by_type': {row['type']: {'total': row['total'], 'spam': row['spam_count']} for row in type_stats},
+            'recent_activity': [{'date': row['date'].isoformat(), 'total': row['total'], 'spam': row['spam_count']} for row in recent_activity]
+        }
+        
+        return jsonify(stats), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting stats: {e}")
+        return jsonify({'error': 'Error getting statistics'}), 500
+    
 @app.route('/api/test-predict', methods=['POST'])
 def test_predict():
     data = request.get_json()
