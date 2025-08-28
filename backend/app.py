@@ -10,15 +10,17 @@ from psycopg2.extras import RealDictCursor
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes import MultinomialNB
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.pipeline import Pipeline
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report, accuracy_score
+from sklearn.metrics import accuracy_score
 import pandas as pd
 import json
 import re
 import unicodedata
-from collections import defaultdict
+import pickle
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app, resources={
@@ -30,30 +32,23 @@ CORS(app, resources={
     }
 })
 
-# Configuration
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev_key_please_change_in_production')
-app.config['DATABASE_URL'] = os.environ.get(
-    'DATABASE_URL',
-    'postgresql://postgres:Mango%40292@localhost:5432/spam_detection'
-)
+app.config['DATABASE_URL'] = os.environ.get('DATABASE_URL', 'postgresql://postgres:Mango%40292@localhost:5432/spam_detection')
 app.config['JWT_EXPIRATION'] = int(os.environ.get('JWT_EXPIRATION', 86400))
 
-# Global model variables
-spam_model = None
-text_preprocessor = None
-tfidf_vectorizer = None
+spam_models = {}
+vectorizers = {}
+model_trained = False
 
-# Database connection
 def get_db_connection():
     try:
         conn = psycopg2.connect(app.config['DATABASE_URL'])
         conn.autocommit = True
         return conn
-    except:
-        print("Warning: Database connection failed. Some features may not work.")
+    except Exception as e:
+        logger.warning(f"Database connection failed: {e}")
         return None
 
-# Initialize database
 def init_db():
     try:
         conn = get_db_connection()
@@ -99,10 +94,10 @@ def init_db():
         conn.commit()
         cursor.close()
         conn.close()
+        logger.info("Database initialized successfully")
     except Exception as e:
-        print(f"Database initialization warning: {e}")
+        logger.error(f"Database initialization error: {e}")
 
-# Enhanced multi-language spam detection
 class MultiLanguagePreprocessor:
     def __init__(self):
         self.spam_keywords = {
@@ -110,9 +105,7 @@ class MultiLanguagePreprocessor:
                 'বিনামূল্যে', 'ফ্রি', 'জিতুন', 'পুরস্কার', 'লটারি', 'টাকা', 'অফার',
                 'ছাড়', 'জরুরি', 'এখনই', 'ক্লিক', 'কল করুন', 'গ্যারান্টি', 'বিজয়ী',
                 'লাভজনক', 'সুযোগ', 'সীমিত', 'দ্রুত', 'নিশ্চিত', 'জিতেছেন', 'পেতে',
-                'রিচার্জ', 'লক্ষ', 'হাজার', 'কোটি', 'একাউন্ট', 'বন্ধ', 'সমস্যা',
-                'কিস্তি', 'ঋণ', 'ইএমআই', 'ধার', 'ফান্ড', 'প্রফিট', 'ডিপোজিট',
-                'সঞ্চয়', 'ইনকাম', 'আয়', 'অর্থ', 'পেমেন্ট', 'লেনদেন', 'ক্যাশ'
+                'রিচার্জ', 'লক্ষ', 'হাজার', 'কোটি', 'একাউন্ট', 'বন্ধ', 'সমস্যা'
             ],
             'english': [
                 'free', 'win', 'winner', 'cash', 'prize', 'urgent', 'offer',
@@ -125,13 +118,17 @@ class MultiLanguagePreprocessor:
                 'gratis', 'ganar', 'ganador', 'dinero', 'premio', 'urgente', 'oferta',
                 'limitado', 'clic', 'llame ahora', 'garantía', 'descuento',
                 'felicitaciones', 'suerte', 'seleccionado', 'préstamo', 'crédito',
-                'efectivo', 'bono', 'exclusivo', 'tiempo limitado', 'oportunidad'
+                'efectivo', 'bono', 'exclusivo', 'tiempo limitado', 'oportunidad',
+                'euros', 'dólares', 'promoción', 'sorteo', 'lotería', 'gratuito',
+                'llamar', 'teléfono', 'contactar', 'inmediatamente', 'rápidamente'
             ]
         }
 
     def detect_language(self, text):
+        text_lower = text.lower()
+        
         bengali_chars = len(re.findall(r'[\u0980-\u09FF]', text))
-        spanish_chars = len(re.findall(r'[áéíóúñ¿¡ü]', text.lower()))
+        spanish_chars = len(re.findall(r'[áéíóúñüÁÉÍÓÚÑÜ¿¡àèìòù]', text))
         total_chars = len(re.sub(r'[\s\d\W]', '', text))
         
         if total_chars == 0:
@@ -140,36 +137,222 @@ class MultiLanguagePreprocessor:
         bengali_ratio = bengali_chars / max(total_chars, 1)
         spanish_ratio = spanish_chars / max(total_chars, 1)
         
-        spanish_words = ['gratis', 'ganar', 'dinero', 'premio', 'oferta', 'urgente']
-        has_spanish_words = any(word in text.lower() for word in spanish_words)
+        spanish_indicators = [
+            'gratis', 'ganar', 'dinero', 'premio', 'oferta', 'urgente', 'garantía',
+            'descuento', 'felicitaciones', 'euros', 'dólares', 'hola', 'cómo',
+            'qué', 'sí', 'muy', 'bien', 'gracias', 'usted', 'señor', 'ahora'
+        ]
+        spanish_word_count = sum(1 for word in spanish_indicators if word in text_lower)
+        has_spanish_punctuation = bool(re.search(r'[¿¡]', text))
         
         if bengali_ratio > 0.1:
             return 'bangla'
-        elif spanish_ratio > 0.02 or has_spanish_words:
+        elif (spanish_ratio > 0.01 or spanish_word_count >= 1 or has_spanish_punctuation or
+              any(word in text_lower for word in ['gratis', 'ganar', 'dinero', 'euros'])):
             return 'spanish'
         else:
             return 'english'
 
-def calculate_spam_confidence(spam_score, indicators, is_spam):
-    if is_spam:
-        base_confidence = 0.60
-        high_value_boost = 0
-        if indicators.get('phone_numbers', 0) > 0:
-            high_value_boost += 0.15
-        if indicators.get('money_mentions', 0) > 0:
-            high_value_boost += 0.12
-        if indicators.get('urls', 0) > 0:
-            high_value_boost += 0.10
-        keyword_boost = min(indicators.get('spam_keywords', 0) * 0.05, 0.15)
-        confidence = base_confidence + high_value_boost + keyword_boost
-        return min(confidence, 0.98)
-    else:
-        if spam_score <= 1:
-            return 0.88
-        elif spam_score == 2:
-            return 0.65
-        else:
-            return 0.52
+    def preprocess_text(self, text, language):
+        text = text.lower().strip()
+        text = re.sub(r'\s+', ' ', text)
+        
+        if language == 'bangla':
+            text = re.sub(r'[a-zA-Z0-9]+', ' ', text)
+        elif language == 'spanish':
+            text = unicodedata.normalize('NFC', text)
+            text = re.sub(r'[^\w\sáéíóúñü¿¡àèìòù]', ' ', text)
+        elif language == 'english':
+            text = re.sub(r'[^\x00-\x7F]+', ' ', text)
+        
+        return re.sub(r'\s+', ' ', text).strip()
+
+def load_training_data():
+    datasets = []
+    
+    dataset_configs = {
+        'emails.csv': {
+            'text_cols': ['text', 'message', 'email', 'content', 'body', 'v2'],
+            'label_cols': ['label', 'spam', 'category', 'class', 'v1']
+        },
+        'Bangla_Email_Dataset.csv': {
+            'text_cols': ['text', 'message', 'email', 'content', 'body'],
+            'label_cols': ['label', 'spam', 'category', 'class']
+        },
+        'Dataset_5971.csv': {
+            'text_cols': ['text', 'message', 'email', 'content', 'body'],
+            'label_cols': ['label', 'spam', 'category', 'class']
+        },
+        'spanish_spam.csv': {
+            'text_cols': ['text', 'message', 'email', 'content', 'texto', 'mensaje'],
+            'label_cols': ['label', 'spam', 'category', 'class', 'etiqueta']
+        }
+    }
+    
+    preprocessor = MultiLanguagePreprocessor()
+    
+    for filename, config in dataset_configs.items():
+        if os.path.exists(filename):
+            try:
+                logger.info(f"Loading {filename}...")
+                
+                for encoding in ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1']:
+                    try:
+                        df = pd.read_csv(filename, encoding=encoding)
+                        break
+                    except UnicodeDecodeError:
+                        continue
+                else:
+                    continue
+                
+                text_col = next((col for col in config['text_cols'] if col in df.columns), None)
+                label_col = next((col for col in config['label_cols'] if col in df.columns), None)
+                
+                if text_col and label_col:
+                    df = df.dropna(subset=[text_col, label_col])
+                    df[label_col] = df[label_col].astype(str).str.lower().str.strip()
+                    
+                    def map_label(label):
+                        if label in ['spam', '1', 'yes', 'true', 'si']:
+                            return 1
+                        elif label in ['ham', '0', 'no', 'false']:
+                            return 0
+                        return None
+                    
+                    df['is_spam'] = df[label_col].apply(map_label)
+                    df = df.dropna(subset=['is_spam'])
+                    df['detected_language'] = df[text_col].apply(preprocessor.detect_language)
+                    
+                    for _, row in df.iterrows():
+                        if isinstance(row[text_col], str) and len(row[text_col].strip()) > 0:
+                            datasets.append({
+                                'text': row[text_col],
+                                'label': int(row['is_spam']),
+                                'language': row['detected_language'],
+                                'source': filename
+                            })
+                    
+                    logger.info(f"Loaded {len(df)} samples from {filename}")
+                    
+            except Exception as e:
+                logger.error(f"Error loading {filename}: {e}")
+    
+    if not datasets:
+    # Fallback synthetic data
+        synthetic_data = [
+            # English spam
+            ("Win $1000 cash now! Call 555-0123!", 1, 'english'),
+            ("FREE MONEY! Click here now!", 1, 'english'),
+            ("Congratulations! You are the lucky winner of a free vacation.", 1, 'english'),
+            ("Exclusive deal: Buy one get one free. Limited time!", 1, 'english'),
+            ("Claim your bonus reward instantly!", 1, 'english'),
+
+            # English ham
+            ("Hello, how are you today?", 0, 'english'),
+            ("Meeting at 3pm tomorrow", 0, 'english'),
+            ("Don't forget to bring your laptop to the office.", 0, 'english'),
+            ("Happy Birthday! Wishing you a wonderful day.", 0, 'english'),
+
+            # Bangla spam
+            ("আপনি ১ লক্ষ টাকা জিতেছেন! কল করুন", 1, 'bangla'),
+            ("বিনামূল্যে টাকা পেতে ক্লিক করুন!", 1, 'bangla'),
+            ("শুধুমাত্র আজ! বিশেষ অফার শেষ হয়ে যাচ্ছে।", 1, 'bangla'),
+            ("ফ্রি বোনাস পেতে এখনই লগইন করুন।", 1, 'bangla'),
+            ("আপনার মোবাইল নম্বর লটারি জিতেছে!", 1, 'bangla'),
+
+            # Bangla ham
+            ("আজকে কেমন আছেন?", 0, 'bangla'),
+            ("আগামীকাল ক্লাস সকাল ১০টায় শুরু হবে।", 0, 'bangla'),
+            ("আমি আজকে বই কিনতে গিয়েছিলাম।", 0, 'bangla'),
+            ("আমরা সন্ধ্যায় একসাথে দেখা করব।", 0, 'bangla'),
+
+            # Spanish spam
+            ("¡Felicitaciones! Has ganado 1000 euros gratis", 1, 'spanish'),
+            ("Dinero gratis ahora! Haz clic aquí", 1, 'spanish'),
+            ("Oferta exclusiva: gana dinero rápido sin esfuerzo.", 1, 'spanish'),
+            ("Trabaja desde casa y recibe $2000 cada semana.", 1, 'spanish'),
+            ("Lotería garantizada, reclama tu premio ahora!", 1, 'spanish'),
+
+            # Spanish ham
+            ("Hola, ¿cómo estás?", 0, 'spanish'),
+            ("Nos vemos mañana en la reunión.", 0, 'spanish'),
+            ("Feliz cumpleaños! Que tengas un gran día.", 0, 'spanish'),
+            ("El clima hoy está muy agradable.", 0, 'spanish'),
+        ]
+
+    for text, label, lang in synthetic_data:
+        datasets.append({'text': text, 'label': label, 'language': lang, 'source': 'synthetic'})
+
+    return pd.DataFrame(datasets)
+
+def train_models():
+    global spam_models, vectorizers, model_trained
+    
+    data = load_training_data()
+    if data.empty:
+        return False
+    
+    logger.info(f"Training with {len(data)} samples")
+    preprocessor = MultiLanguagePreprocessor()
+    
+    for language in data['language'].unique():
+        lang_data = data[data['language'] == language]
+        if len(lang_data) < 4:
+            continue
+        
+        texts = [preprocessor.preprocess_text(text, language) for text in lang_data['text']]
+        labels = lang_data['label'].values
+        
+        vectorizer = TfidfVectorizer(max_features=3000, ngram_range=(1, 2), min_df=1, max_df=0.9)
+        
+        try:
+            X = vectorizer.fit_transform(texts)
+            if len(lang_data) >= 8:
+                X_train, X_test, y_train, y_test = train_test_split(X, labels, test_size=0.2, random_state=42, stratify=labels)
+            else:
+                X_train, X_test, y_train, y_test = X, X, labels, labels
+            
+            model = MultinomialNB(alpha=0.1)
+            model.fit(X_train, y_train)
+            
+            accuracy = accuracy_score(y_test, model.predict(X_test))
+            logger.info(f"{language} model accuracy: {accuracy:.3f}")
+            
+            spam_models[language] = model
+            vectorizers[language] = vectorizer
+            
+        except Exception as e:
+            logger.error(f"Error training {language}: {e}")
+    
+    if spam_models:
+        model_trained = True
+        os.makedirs('models', exist_ok=True)
+        for lang in spam_models:
+            with open(f'models/{lang}_model.pkl', 'wb') as f:
+                pickle.dump(spam_models[lang], f)
+            with open(f'models/{lang}_vectorizer.pkl', 'wb') as f:
+                pickle.dump(vectorizers[lang], f)
+        return True
+    return False
+
+def predict_with_ml_model(text, language):
+    if not model_trained or language not in spam_models:
+        return None, 0.5
+    
+    try:
+        preprocessor = MultiLanguagePreprocessor()
+        processed_text = preprocessor.preprocess_text(text, language)
+        if not processed_text.strip():
+            return None, 0.5
+        
+        X = vectorizers[language].transform([processed_text])
+        prediction = spam_models[language].predict(X)[0]
+        probabilities = spam_models[language].predict_proba(X)[0]
+        
+        return bool(prediction), max(probabilities)
+    except Exception as e:
+        logger.error(f"ML prediction error: {e}")
+        return None, 0.5
 
 def token_required(f):
     @wraps(f)
@@ -197,30 +380,18 @@ def token_required(f):
             if not current_user:
                 return jsonify({'message': 'User no longer exists!'}), 401
         except Exception as e:
-            return jsonify({'message': 'Token is invalid!', 'error': str(e)}), 401
+            return jsonify({'message': 'Token is invalid!'}), 401
         
-        return f(current_user, *args, **kwargs)
-    return decorated
-
-def admin_required(f):
-    @wraps(f)
-    def decorated(current_user, *args, **kwargs):
-        if current_user['role'] != 'admin':
-            return jsonify({'message': 'Admin privileges required!'}), 403
         return f(current_user, *args, **kwargs)
     return decorated
 
 @app.route('/api/auth/register', methods=['POST'])
 def register():
     data = request.get_json()
-    name = data.get('name')
-    email = data.get('email')
-    password = data.get('password')
+    name, email, password = data.get('name'), data.get('email'), data.get('password')
     
-    if not name or not email or not password:
+    if not all([name, email, password]):
         return jsonify({'message': 'Missing required fields'}), 400
-    
-    hashed_password = generate_password_hash(password)
     
     try:
         conn = get_db_connection()
@@ -232,10 +403,8 @@ def register():
         if cursor.fetchone():
             return jsonify({'message': 'Email already registered'}), 409
         
-        cursor.execute(
-            "INSERT INTO users (name, email, password) VALUES (%s, %s, %s) RETURNING id",
-            (name, email, hashed_password)
-        )
+        hashed_password = generate_password_hash(password)
+        cursor.execute("INSERT INTO users (name, email, password) VALUES (%s, %s, %s) RETURNING id", (name, email, hashed_password))
         user_id = cursor.fetchone()[0]
         
         conn.commit()
@@ -249,8 +418,7 @@ def register():
 @app.route('/api/auth/login', methods=['POST'])
 def login():
     data = request.get_json()
-    email = data.get('email')
-    password = data.get('password')
+    email, password = data.get('email'), data.get('password')
     
     if not email or not password:
         return jsonify({'message': 'Missing email or password'}), 400
@@ -301,32 +469,9 @@ def predict_spam(current_user):
         message = data.get('message')
         message_type = data.get('type', 'email')
 
-        # Enhanced language detection
-        def detect_language_enhanced(text):
-            bengali_chars = len(re.findall(r'[\u0980-\u09FF]', text))
-            spanish_chars = len(re.findall(r'[áéíóúñ¿¡ü]', text.lower()))
-            total_chars = len(re.sub(r'[\s\d\W]', '', text))
-            
-            if total_chars == 0:
-                return 'english'
-            
-            bengali_ratio = bengali_chars / max(total_chars, 1)
-            spanish_ratio = spanish_chars / max(total_chars, 1)
-            
-            spanish_words = ['gratis', 'ganar', 'dinero', 'premio', 'oferta', 'urgente']
-            has_spanish_words = any(word in text.lower() for word in spanish_words)
-            
-            if bengali_ratio > 0.1:
-                return 'bangla'
-            elif spanish_ratio > 0.02 or has_spanish_words:
-                return 'spanish'
-            else:
-                return 'english'
+        preprocessor = MultiLanguagePreprocessor()
+        language = preprocessor.detect_language(message)
         
-        language = detect_language_enhanced(message)
-        
-        # Initialize spam detection variables
-        spam_score = 0
         indicators = {
             'spam_keywords': 0,
             'phone_numbers': 0,
@@ -336,156 +481,69 @@ def predict_spam(current_user):
             'text_length': len(message)
         }
         
+        spam_score = 0
         message_lower = message.lower()
 
-        # Language-specific spam detection
-        if language == 'bangla':
-            bangla_spam_keywords = [
-                'বিনামূল্যে', 'ফ্রি', 'জিতুন', 'পুরস্কার', 'লটারি', 'টাকা', 'অফার',
-                'ছাড়', 'জরুরি', 'এখনই', 'ক্লিক', 'কল করুন', 'গ্যারান্টি', 'বিজয়ী',
-                'লাভজনক', 'সুযোগ', 'সীমিত', 'দ্রুত', 'নিশ্চিত', 'জিতেছেন', 'পেতে',
-                'রিচার্জ', 'লক্ষ', 'হাজার', 'কোটি', 'একাউন্ট', 'বন্ধ', 'সমস্যা',
-                'কিস্তি', 'ঋণ', 'ইএমআই', 'ধার', 'ফান্ড', 'প্রফিট', 'ডিপোজিট',
-                'অবিশ্বাস্য', 'বিশেষ', 'প্রমোশন', 'উপহার', 'ডিল', 'এক্সক্লুসিভ',
-                'অর্ডার', 'সাবস্ক্রিপশন', 'রেজিস্ট্রেশন', 'ফ্রি ট্রায়াল', 'বিনিয়োগ',
-                'আয়', 'ক্যাশব্যাক', 'ডিসকাউন্ট', 'প্রাইজ', 'অ্যাক্সেস', 'মেম্বারশিপ',
-                'অনলাইন', 'ডেলিভারি', 'স্টক', 'লিমিটেড', 'প্রাপ্তি', 'অনুমোদন', 'আপডেট'
-            ]
-            
-            keyword_found = 0
-            for keyword in bangla_spam_keywords:
-                if keyword in message:
-                    spam_score += 1
-                    keyword_found += 1
-            indicators['spam_keywords'] = keyword_found
+        # Get ML prediction
+        ml_prediction, ml_confidence = predict_with_ml_model(message, language)
+        
+        # Rule-based indicators
+        spam_keywords = preprocessor.spam_keywords.get(language, [])
+        for keyword in spam_keywords:
+            if keyword.lower() in message_lower:
+                spam_score += 1
+                indicators['spam_keywords'] += 1
 
-            # Phone patterns
-            phone_patterns = [
-                r'(\+?88)?[-\s]?01[3-9]\d{8}',
-                r'[০-৯]{11}',
-                r'\b\d{11}\b',
-                r'\b01[3-9]\d{8}\b'
-            ]
-            for pattern in phone_patterns:
-                if re.search(pattern, message):
-                    spam_score += 2
-                    indicators['phone_numbers'] += 1
-                    break
-
-            # Money patterns
-            money_patterns = [
-                r'৳\s*[\d০-৯]+',
-                r'[\d০-৯]+\s*(টাকা|হাজার|লক্ষ|লাখ|কোটি)',
-                r'\d+\s*(টাকা|হাজার|লক্ষ|লাখ|কোটি)'
-            ]
-            for pattern in money_patterns:
-                if re.search(pattern, message):
-                    spam_score += 2
-                    indicators['money_mentions'] += 1
-                    break
-
-            # Urgent words
-            urgent_words = ['জরুরি', 'এখনই', 'তাড়াতাড়ি', 'দ্রুত', 'অবিলম্বে']
-            for word in urgent_words:
-                if word in message:
-                    spam_score += 1
-                    indicators['urgent_words'] += 1
-
-        elif language == 'spanish':
-            spanish_spam_keywords = [
-                'gratis', 'ganar', 'ganador', 'dinero', 'premio', 'urgente', 'oferta',
-                'limitado', 'clic', 'llame ahora', 'garantía', 'descuento',
-                'felicitaciones', 'suerte', 'seleccionado', 'préstamo', 'crédito',
-                'efectivo', 'bono', 'exclusivo', 'tiempo limitado', 'oportunidad',
-                'barato', 'precio más bajo', 'liquidación', 'oferta especial',
-                'ilimitado', 'dinero rápido', 'hazte rico', 'ingresos fáciles'
-            ]
-            
-            keyword_found = 0
-            for keyword in spanish_spam_keywords:
-                if keyword.lower() in message_lower:
-                    spam_score += 1
-                    keyword_found += 1
-            indicators['spam_keywords'] = keyword_found
-
-            # Spanish phone patterns
-            phone_patterns = [
-                r'\b\d{3}[-.\s]?\d{3}[-.\s]?\d{3}\b',
-                r'\+34\s?\d{9}',
-                r'\b\d{9}\b'
-            ]
-            for pattern in phone_patterns:
-                if re.search(pattern, message):
-                    spam_score += 2
-                    indicators['phone_numbers'] += 1
-                    break
-
-            # Spanish money patterns
-            money_patterns = [r'€\s*\d+', r'\d+\s*(euros?|dólares?)', r'[$€]\s*\d+']
-            for pattern in money_patterns:
-                if re.search(pattern, message_lower):
-                    spam_score += 2
-                    indicators['money_mentions'] += 1
-                    break
-
-            # Spanish urgent words
-            urgent_words = ['urgente', 'ahora', 'rápido', 'tiempo limitado', 'actúa ahora']
-            for word in urgent_words:
-                if word.lower() in message_lower:
-                    spam_score += 1
-                    indicators['urgent_words'] += 1
-
-        else:  # English
-            english_spam_keywords = [
-                'free', 'win', 'winner', 'cash', 'prize', 'urgent', 'offer',
-                'limited', 'click', 'call now', 'guarantee', 'discount',
-                'congratulation', 'lucky', 'selected', 'money', 'loan',
-                'credit', 'debt', 'bonus', 'reward', 'exclusive'
-            ]
-            
-            keyword_found = 0
-            for keyword in english_spam_keywords:
-                if keyword.lower() in message_lower:
-                    spam_score += 1
-                    keyword_found += 1
-            indicators['spam_keywords'] = keyword_found
-
-            # English phone numbers
-            if re.search(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b', message):
+        # Phone patterns
+        phone_patterns = {
+            'bangla': [r'(\+?88)?[-\s]?01[3-9]\d{8}', r'\b\d{11}\b'],
+            'spanish': [r'\+34\s?\d{9}', r'\b\d{9}\b', r'\b6\d{8}\b'],
+            'english': [r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b']
+        }
+        
+        for pattern in phone_patterns.get(language, []):
+            if re.search(pattern, message):
                 spam_score += 2
                 indicators['phone_numbers'] += 1
+                break
 
-            # English money mentions
-            if re.search(r'[$€£]\s*\d+|\d+\s*(?:dollars|euro|pound|USD|EUR|GBP)', message_lower):
+        # Money patterns
+        money_patterns = {
+            'bangla': [r'৳\s*[\d০-৯]+', r'[\d০-৯]+\s*(টাকা|হাজার|লক্ষ|কোটি)'],
+            'spanish': [r'€\s*\d+', r'\d+\s*euros?', r'\d+\s*dólares?'],
+            'english': [r'[$€£]\s*\d+', r'\d+\s*(?:dollars|euro|pound)']
+        }
+        
+        for pattern in money_patterns.get(language, []):
+            if re.search(pattern, message_lower):
                 spam_score += 2
                 indicators['money_mentions'] += 1
+                break
 
-            # English urgent words
-            urgent_words = ['urgent', 'now', 'hurry', 'limited time', 'act now', 'today only']
-            for word in urgent_words:
-                if word.lower() in message_lower:
-                    spam_score += 1
-                    indicators['urgent_words'] += 1
+        # Urgent words
+        urgent_words = {
+            'bangla': ['জরুরি', 'এখনই', 'তাড়াতাড়ি', 'দ্রুত'],
+            'spanish': ['urgente', 'ahora', 'rápido', 'inmediatamente'],
+            'english': ['urgent', 'now', 'hurry', 'immediately']
+        }
+        
+        for word in urgent_words.get(language, []):
+            if word.lower() in message_lower:
+                spam_score += 1
+                indicators['urgent_words'] += 1
 
-        # Check for URLs (universal)
-        if re.search(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', message):
+        # URLs
+        if re.search(r'http[s]?://\S+', message):
             spam_score += 2
             indicators['urls'] += 1
 
-        # Enhanced spam determination logic
-        if spam_score >= 4:
-            is_spam = True
-        elif spam_score >= 3:
-            high_value_indicators = indicators['phone_numbers'] + indicators['money_mentions'] + indicators['urls']
-            is_spam = high_value_indicators >= 1
-        elif spam_score >= 2:
-            high_value_indicators = indicators['phone_numbers'] + indicators['money_mentions'] + indicators['urls']
-            is_spam = high_value_indicators >= 1 and indicators['spam_keywords'] >= 1
+        # Final decision
+        if ml_prediction is not None:
+            is_spam = ml_prediction
+            confidence = ml_confidence
         else:
-            is_spam = False
-
-        # Calculate confidence
-        confidence = calculate_spam_confidence(spam_score, indicators, is_spam)
+            is_spam = spam_score >= 3
+            confidence = 0.85 if is_spam else 0.75
 
         result = {
             'isSpam': is_spam,
@@ -501,17 +559,14 @@ def predict_spam(current_user):
             if conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    """INSERT INTO messages 
-                       (user_id, content, type, language, is_spam, confidence, spam_indicators) 
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                    (current_user['id'], message, message_type, language,
-                     is_spam, confidence, json.dumps(indicators))
+                    "INSERT INTO messages (user_id, content, type, language, is_spam, confidence, spam_indicators) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (current_user['id'], message, message_type, language, is_spam, confidence, json.dumps(indicators))
                 )
                 conn.commit()
                 cursor.close()
                 conn.close()
         except Exception as db_error:
-            print(f"Database error: {db_error}")
+            logger.error(f"Database error: {db_error}")
 
         return jsonify(result), 200
 
@@ -520,86 +575,41 @@ def predict_spam(current_user):
 
 @app.route('/api/test-predict', methods=['POST'])
 def test_predict():
-    """Test endpoint for prediction without authentication"""
     data = request.get_json()
     message = data.get('message', '')
     
     if not message:
         return jsonify({'error': 'No message provided'}), 400
     
-    # Mock current_user for testing
-    mock_user = {'id': 1}
-    
-    # Use same logic as main predict endpoint but skip database operations
     try:
-        def detect_language_enhanced(text):
-            bengali_chars = len(re.findall(r'[\u0980-\u09FF]', text))
-            spanish_chars = len(re.findall(r'[áéíóúñ¿¡ü]', text.lower()))
-            total_chars = len(re.sub(r'[\s\d\W]', '', text))
-            
-            if total_chars == 0:
-                return 'english'
-            
-            bengali_ratio = bengali_chars / max(total_chars, 1)
-            spanish_ratio = spanish_chars / max(total_chars, 1)
-            
-            spanish_words = ['gratis', 'ganar', 'dinero', 'premio', 'oferta', 'urgente']
-            has_spanish_words = any(word in text.lower() for word in spanish_words)
-            
-            if bengali_ratio > 0.1:
-                return 'bangla'
-            elif spanish_ratio > 0.02 or has_spanish_words:
-                return 'spanish'
-            else:
-                return 'english'
+        preprocessor = MultiLanguagePreprocessor()
+        language = preprocessor.detect_language(message)
         
-        language = detect_language_enhanced(message)
+        ml_prediction, ml_confidence = predict_with_ml_model(message, language)
+        
+        # Simple rule-based fallback
         spam_score = 0
-        indicators = {'spam_keywords': 0, 'phone_numbers': 0, 'money_mentions': 0, 'urgent_words': 0, 'urls': 0}
-        message_lower = message.lower()
-
-        # Same detection logic as main endpoint
-        if language == 'bangla':
-            keywords = ['বিনামূল্যে', 'ফ্রি', 'জিতুন', 'টাকা', 'জরুরি', 'এখনই']
-            for kw in keywords:
-                if kw in message:
-                    spam_score += 1
-                    indicators['spam_keywords'] += 1
-        elif language == 'spanish':
-            keywords = ['gratis', 'ganar', 'dinero', 'premio', 'urgente']
-            for kw in keywords:
-                if kw in message_lower:
-                    spam_score += 1
-                    indicators['spam_keywords'] += 1
+        spam_keywords = preprocessor.spam_keywords.get(language, [])
+        for keyword in spam_keywords:
+            if keyword.lower() in message.lower():
+                spam_score += 1
+        
+        if re.search(r'\d{3,}', message):  # Phone/money numbers
+            spam_score += 2
+        
+        if ml_prediction is not None:
+            is_spam = ml_prediction
+            confidence = ml_confidence
         else:
-            keywords = ['free', 'win', 'money', 'urgent', 'prize']
-            for kw in keywords:
-                if kw in message_lower:
-                    spam_score += 1
-                    indicators['spam_keywords'] += 1
-
-        # Check patterns
-        if re.search(r'(\d{3}[-.]?\d{3}[-.]?\d{4}|01[3-9]\d{8}|\d{9,11})', message):
-            spam_score += 2
-            indicators['phone_numbers'] += 1
-
-        if re.search(r'([$€£৳]\s*\d+|\d+\s*(dollars|euros|টাকা|হাজার))', message, re.IGNORECASE):
-            spam_score += 2
-            indicators['money_mentions'] += 1
-
-        if re.search(r'http[s]?://', message):
-            spam_score += 2
-            indicators['urls'] += 1
-
-        is_spam = spam_score >= 2
-        confidence = calculate_spam_confidence(spam_score, indicators, is_spam)
+            is_spam = spam_score >= 2
+            confidence = 0.8 if is_spam else 0.7
 
         return jsonify({
             'isSpam': is_spam,
             'confidence': confidence,
             'message': 'Spam detected' if is_spam else 'Not spam',
             'language': language,
-            'indicators': indicators
+            'indicators': {'spam_keywords': spam_score}
         }), 200
 
     except Exception as e:
@@ -609,7 +619,9 @@ def test_predict():
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'timestamp': datetime.now(timezone.utc).isoformat()
+        'timestamp': datetime.now(timezone.utc).isoformat(),
+        'models_trained': model_trained,
+        'available_languages': list(spam_models.keys()) if model_trained else []
     }), 200
 
 def initialize_app():
@@ -618,31 +630,11 @@ def initialize_app():
         init_db()
         print("✅ Database initialized")
         
-        # Test multi-language detection
-        test_messages = [
-            ("Win free money now! Call 123-456-7890", "English spam"),
-            ("আপনি ১ লক্ষ টাকা জিতেছেন! এখনই কল করুন", "Bangla spam"),
-            ("¡Felicitaciones! Has ganado 1000 euros gratis", "Spanish spam"),
-            ("Hello, how are you?", "English ham"),
-            ("আজকে কেমন আছেন?", "Bangla ham"),
-            ("Hola, ¿cómo estás?", "Spanish ham")
-        ]
-        
-        print("\n🧪 Testing multi-language detection:")
-        for msg, expected in test_messages:
-            # Quick language detection test
-            bengali_chars = len(re.findall(r'[\u0980-\u09FF]', msg))
-            spanish_chars = len(re.findall(r'[áéíóúñ¿¡ü]', msg.lower()))
-            spanish_words = any(word in msg.lower() for word in ['gratis', 'ganar', 'dinero'])
-            
-            if bengali_chars > 0:
-                lang = 'bangla'
-            elif spanish_chars > 0 or spanish_words:
-                lang = 'spanish'
-            else:
-                lang = 'english'
-                
-            print(f"✅ {expected} -> Detected: {lang}")
+        # Try to load existing models or train new ones
+        if not train_models():
+            print("⚠️  No models trained, using rule-based detection only")
+        else:
+            print("✅ ML models trained successfully")
         
         print("✅ Multi-language spam detection ready!")
         
