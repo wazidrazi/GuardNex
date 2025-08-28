@@ -289,6 +289,7 @@ class DetectionService {
                 default:
                     return date.toLocaleTimeString();
             }
+            // eslint-disable-next-line no-unused-vars
         } catch (error) {
             return 'Unknown';
         }
