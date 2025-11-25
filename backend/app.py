@@ -1155,6 +1155,64 @@ def get_admin_users(current_user):
         logger.error(f"Traceback: {traceback.format_exc()}")
         return jsonify({'error': f'Error fetching users: {str(e)}'}), 200
 
+# Delete user endpoint
+@app.route('/api/admin/users/<int:user_id>', methods=['DELETE'])
+@token_required
+def delete_admin_user(current_user, user_id):
+    try:
+        logger.info(f"Admin {current_user['id']} requesting to delete user {user_id}")
+        
+        if current_user['role'] != 'admin':
+            logger.warning(f"Non-admin user {current_user['id']} attempted to delete user")
+            return jsonify({'error': 'Unauthorized access'}), 403
+        
+        # Prevent self-deletion
+        if current_user['id'] == user_id:
+            return jsonify({'error': 'Cannot delete your own account'}), 400
+        
+        conn = get_db_connection()
+        if not conn:
+            logger.error("Database connection failed")
+            return jsonify({'error': 'Database unavailable'}), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Check if user exists
+        cursor.execute("SELECT id, name, email FROM users WHERE id = %s", (user_id,))
+        user = cursor.fetchone()
+        
+        if not user:
+            cursor.close()
+            conn.close()
+            logger.warning(f"Attempted to delete non-existent user {user_id}")
+            return jsonify({'error': 'User not found'}), 404
+        
+        # Delete associated messages first (foreign key constraint)
+        cursor.execute("DELETE FROM messages WHERE user_id = %s", (user_id,))
+        logger.info(f"Deleted messages for user {user_id}")
+        
+        # Delete the user
+        cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
+        logger.info(f"Deleted user {user_id}: {user['name']} ({user['email']})")
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        return jsonify({
+            'message': f'User {user["name"]} and associated messages have been deleted successfully',
+            'deletedUser': {
+                'id': user['id'],
+                'name': user['name'],
+                'email': user['email']
+            }
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error deleting user: {str(e)}", exc_info=True)
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({'error': f'Error deleting user: {str(e)}'}), 500
+
 # Admin endpoints for Messages
 @app.route('/api/admin/messages', methods=['GET'])
 @token_required
