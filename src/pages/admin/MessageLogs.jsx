@@ -13,7 +13,7 @@ const MessageLogs = () => {
     type: "all",
   });
 
-  const fetchMessages = async () => {
+const fetchMessages = async () => {
     try {
       setLoading(true);
       setError(null);
@@ -21,8 +21,11 @@ const MessageLogs = () => {
 
       if (!token) {
         toast.error("Authentication required");
+        setLoading(false);
         return;
       }
+
+      console.log('Fetching messages with filters:', filters);
 
       const response = await axios.get(`${API_URL}/admin/messages`, {
         headers: {
@@ -34,18 +37,28 @@ const MessageLogs = () => {
         },
       });
 
-      if (response.data) {
+      console.log('Messages response:', response.data);
+
+      if (Array.isArray(response.data)) {
         setMessages(response.data);
+      } else if (response.data && Array.isArray(response.data.data)) {
+        setMessages(response.data.data);
+      } else {
+        console.warn('No messages or invalid format');
+        setMessages([]);
       }
+      
+      setLoading(false);
     } catch (error) {
       console.error("Error fetching messages:", error);
-      setError(error);
+      setError(error.message);
+      setMessages([]);
+      
       if (error.response?.status === 401) {
         toast.error("Session expired. Please login again.");
       } else {
-        toast.error("Error loading message logs");
+        toast.error("Error loading message logs: " + (error.message || 'Unknown error'));
       }
-    } finally {
       setLoading(false);
     }
   };
@@ -150,20 +163,31 @@ const MessageLogs = () => {
       },
     },
     {
-      Header: "Language",
-      accessor: "language",
-      Cell: ({ value }) => (
-        <span className="capitalize px-2 py-1 text-xs rounded-md bg-blue-100 text-blue-800">
-          {value}
-        </span>
-      ),
-    },
-    {
       Header: "Date",
       accessor: "created_at",
       Cell: ({ value }) => new Date(value).toLocaleString(),
     },
+    {
+      Header: "Actions",
+      accessor: "actions",
+      Cell: ({ row }) => (
+        <div className="flex gap-2">
+          <button
+            onClick={() => {
+              setSelectedMessage(row.original);
+              setShowModal(true);
+            }}
+            className="text-sm text-blue-600"
+          >
+            View
+          </button>
+        </div>
+      ),
+    },
   ];
+
+  const [showModal, setShowModal] = useState(false);
+  const [selectedMessage, setSelectedMessage] = useState(null);
 
   if (loading) {
     return (
@@ -222,6 +246,31 @@ const MessageLogs = () => {
         initialItemsPerPage={10}
         actions={<FilterActions />}
       />
+
+      {showModal && selectedMessage && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="bg-white rounded-lg w-full max-w-2xl p-6">
+            <div className="flex justify-between items-start">
+              <h3 className="text-lg font-semibold">Message Details</h3>
+              <button onClick={() => setShowModal(false)} className="text-gray-500">Close</button>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              <div><strong>User:</strong> {selectedMessage.user?.name} &lt;{selectedMessage.user?.email}&gt;</div>
+              <div><strong>Type:</strong> {selectedMessage.type}</div>
+              <div><strong>Detected:</strong> {selectedMessage.is_spam ? 'Spam' : 'Not Spam'}</div>
+              <div><strong>Confidence:</strong> {Math.round((selectedMessage.confidence || 0) * 100)}%</div>
+              <div className="pt-2 border-t">
+                <pre className="whitespace-pre-wrap text-sm text-gray-800">{selectedMessage.content}</pre>
+              </div>
+            </div>
+
+            <div className="mt-6 text-right">
+              <button onClick={() => setShowModal(false)} className="px-4 py-2 bg-gray-200 rounded">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

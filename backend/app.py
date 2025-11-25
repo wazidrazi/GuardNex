@@ -18,6 +18,7 @@ import re
 import unicodedata
 import pickle
 import logging
+import traceback
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -675,14 +676,18 @@ def predict_spam(current_user):
         # Save to database with better error handling
         saved_successfully = False
         try:
+            logger.info(f"Attempting to save message to database")
             conn = get_db_connection()
+            logger.info(f"Connection obtained: {conn is not None}")
             if conn:
                 cursor = conn.cursor()
+                logger.info(f"Cursor created, executing insert with: user_id={current_user['id']}, type={message_type}, language={language}, is_spam={is_spam}")
                 cursor.execute(
-                    "INSERT INTO messages (user_id, content, type, language, is_spam, confidence, spam_indicators, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
-                    (current_user['id'], message, message_type, language, is_spam, confidence, json.dumps(indicators), datetime.now(timezone.utc))
+                    "INSERT INTO messages (user_id, content, type, is_spam, confidence, spam_indicators, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                    (current_user['id'], message, message_type, is_spam, confidence, json.dumps(indicators), datetime.now(timezone.utc))
                 )
                 message_id = cursor.fetchone()
+                logger.info(f"Message ID returned: {message_id}")
                 if message_id:
                     result['id'] = message_id[0]
                     saved_successfully = True
@@ -690,8 +695,11 @@ def predict_spam(current_user):
                 conn.commit()
                 cursor.close()
                 conn.close()
+                logger.info(f"Database committed and closed")
+            else:
+                logger.error("Failed to get database connection")
         except Exception as db_error:
-            logger.error(f"Database save error: {db_error}")
+            logger.error(f"Database save error: {db_error}", exc_info=True)
             # Continue without database save
 
         result['saved_to_db'] = saved_successfully
@@ -888,6 +896,189 @@ def test_predict():
     except Exception as e:
         return jsonify({'error': 'Test prediction failed', 'details': str(e)}), 500
 
+@app.route('/api/admin/stats', methods=['GET'])
+@token_required
+def get_admin_stats(current_user):
+    try:
+        # Check if user is admin
+        if current_user['role'] != 'admin':
+            logger.warning(f"Non-admin user {current_user['id']} attempted to access admin stats")
+            return jsonify({'error': 'Unauthorized access'}), 403
+        
+        logger.info(f"Admin stats requested by user {current_user['id']}")
+        
+        conn = get_db_connection()
+        if not conn:
+            logger.warning("Database connection failed")
+            # Return default stats if database is unavailable
+            return jsonify({
+                'totalUsers': 0,
+                'totalMessages': 0,
+                'spamCount': 0,
+                'hamCount': 0,
+                'spamPercentage': 0,
+                'messagesByType': {'email': 0, 'sms': 0, 'social': 0},
+                'recentActivity': [],
+                'messagesByPeriod': [],
+                'accuracyByChannel': {},
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }), 200
+            
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        try:
+            # Total users
+            cursor.execute("SELECT COUNT(*) as total FROM users")
+            user_result = cursor.fetchone()
+            total_users = user_result['total'] if user_result else 0
+            logger.info(f"Total users: {total_users}")
+            
+            # Total messages and spam/ham counts
+            cursor.execute("""
+                SELECT 
+                    COUNT(*) as total_messages,
+                    SUM(CASE WHEN is_spam = true THEN 1 ELSE 0 END) as spam_count,
+                    SUM(CASE WHEN is_spam = false THEN 1 ELSE 0 END) as ham_count
+                FROM messages
+            """)
+            message_stats = cursor.fetchone()
+            
+            total_messages = message_stats['total_messages'] if message_stats else 0
+            spam_count = message_stats['spam_count'] if message_stats else 0
+            ham_count = message_stats['ham_count'] if message_stats else 0
+            logger.info(f"Messages - Total: {total_messages}, Spam: {spam_count}, Ham: {ham_count}")
+            
+            # Messages by type
+            messages_by_type = {'email': 0, 'sms': 0, 'social': 0}
+            try:
+                cursor.execute("""
+                    SELECT type, COUNT(*) as count
+                    FROM messages
+                    GROUP BY type
+                """)
+                message_type_rows = cursor.fetchall()
+                for row in message_type_rows:
+                    if row and row['type'] in messages_by_type:
+                        messages_by_type[row['type']] = row['count']
+                logger.info(f"Messages by type: {messages_by_type}")
+            except Exception as e:
+                logger.warning(f"Error getting messages by type: {e}")
+            
+            # Recent activity (last 10 messages)
+            recent_activity = []
+            try:
+                cursor.execute("""
+                    SELECT 
+                        m.id, m.is_spam, m.type, m.created_at, u.name as user_name
+                    FROM messages m
+                    JOIN users u ON m.user_id = u.id
+                    ORDER BY m.created_at DESC
+                    LIMIT 10
+                """)
+                recent_messages = cursor.fetchall()
+                logger.info(f"Recent messages count: {len(recent_messages)}")
+                
+                for msg in recent_messages:
+                    if msg:
+                        recent_activity.append({
+                            'id': msg['id'],
+                            'isSpam': msg['is_spam'],
+                            'type': msg['type'] or 'email',
+                            'timestamp': msg['created_at'].isoformat() if msg['created_at'] else None,
+                            'user': {'name': msg['user_name'] or 'Unknown'}
+                        })
+            except Exception as e:
+                logger.warning(f"Error getting recent activity: {e}")
+            
+            # Messages by period (last 7 days)
+            messages_by_period = []
+            try:
+                cursor.execute("""
+                    SELECT 
+                        DATE(created_at) as date,
+                        COUNT(*) as total,
+                        SUM(CASE WHEN is_spam = true THEN 1 ELSE 0 END) as spam_count
+                    FROM messages 
+                    WHERE created_at >= NOW() - INTERVAL '7 days'
+                    GROUP BY DATE(created_at)
+                    ORDER BY date DESC
+                """)
+                period_rows = cursor.fetchall()
+                for row in period_rows:
+                    if row:
+                        messages_by_period.append({
+                            'date': row['date'].isoformat() if row['date'] else None,
+                            'total': row['total'] or 0,
+                            'spam': row['spam_count'] or 0
+                        })
+                logger.info(f"Messages by period: {len(messages_by_period)} days")
+            except Exception as e:
+                logger.warning(f"Error getting messages by period: {e}")
+            
+            # Accuracy by channel (spam detection rate)
+            accuracy_by_channel = {}
+            try:
+                cursor.execute("""
+                    SELECT 
+                        type,
+                        COUNT(*) as total,
+                        SUM(CASE WHEN is_spam = true THEN 1 ELSE 0 END) as spam_count,
+                        ROUND(CAST(AVG(confidence) AS NUMERIC) * 100, 2) as accuracy
+                    FROM messages
+                    GROUP BY type
+                """)
+                channel_rows = cursor.fetchall()
+                for row in channel_rows:
+                    if row:
+                        accuracy_by_channel[row['type']] = {
+                            'total': row['total'] or 0,
+                            'spam_count': row['spam_count'] or 0,
+                            'accuracy': float(row['accuracy']) if row['accuracy'] else 0
+                        }
+                logger.info(f"Accuracy by channel: {list(accuracy_by_channel.keys())}")
+            except Exception as e:
+                logger.warning(f"Error getting accuracy by channel: {e}")
+            
+        finally:
+            cursor.close()
+            conn.close()
+        
+        # Calculate overall spam percentage
+        spam_percentage = (spam_count / total_messages * 100) if total_messages > 0 else 0
+        
+        stats = {
+            'totalUsers': total_users,
+            'totalMessages': total_messages,
+            'spamCount': spam_count,
+            'hamCount': ham_count,
+            'spamPercentage': round(spam_percentage, 2),
+            'messagesByType': messages_by_type,
+            'recentActivity': recent_activity,
+            'messagesByPeriod': messages_by_period,
+            'accuracyByChannel': accuracy_by_channel,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+        
+        logger.info(f"Returning admin stats: {stats}")
+        return jsonify(stats), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting admin stats: {str(e)}", exc_info=True)
+        # Return default stats even on error to prevent UI crash
+        return jsonify({
+            'totalUsers': 0,
+            'totalMessages': 0,
+            'spamCount': 0,
+            'hamCount': 0,
+            'spamPercentage': 0,
+            'messagesByType': {'email': 0, 'sms': 0, 'social': 0},
+            'recentActivity': [],
+            'messagesByPeriod': [],
+            'accuracyByChannel': {},
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'error': str(e)
+        }), 200
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({
@@ -897,25 +1088,271 @@ def health_check():
         'available_languages': list(spam_models.keys()) if model_trained else []
     }), 200
 
+# Admin endpoints for Users
+@app.route('/api/admin/users', methods=['GET'])
+@token_required
+def get_admin_users(current_user):
+    try:
+        logger.info(f"Getting admin users for user: {current_user}")
+        
+        if current_user['role'] != 'admin':
+            logger.warning(f"Non-admin user trying to access admin users: {current_user['role']}")
+            return jsonify({'error': 'Unauthorized access'}), 403
+        
+        conn = get_db_connection()
+        if not conn:
+            logger.error("Database connection failed")
+            return jsonify({'error': 'Database unavailable'}), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get users with their message counts
+        logger.info("Executing query to get admin users")
+        cursor.execute("""
+            SELECT 
+                u.id,
+                u.name,
+                u.email,
+                u.role,
+                u.created_at as lastactive,
+                COALESCE(COUNT(m.id), 0) as messagesscanned,
+                COALESCE(SUM(CASE WHEN m.is_spam = true THEN 1 ELSE 0 END), 0) as spamdetected
+            FROM users u
+            LEFT JOIN messages m ON u.id = m.user_id
+            GROUP BY u.id, u.name, u.email, u.role, u.created_at
+            ORDER BY u.created_at DESC
+        """)
+        
+        users = cursor.fetchall()
+        logger.info(f"Fetched {len(users)} users, first user keys: {list(users[0].keys()) if users else 'None'}")
+        cursor.close()
+        conn.close()
+        
+        # Format response
+        users_list = []
+        for user in users:
+            logger.info(f"Processing user: {user}")
+            messages_scanned = user.get('messagesscanned') or 0
+            spam_detected = user.get('spamdetected') or 0
+            logger.info(f"Messages: {messages_scanned}, Spam: {spam_detected}")
+            
+            users_list.append({
+                'id': user['id'],
+                'name': user['name'],
+                'email': user['email'],
+                'role': user['role'],
+                'status': 'active',  # Default status
+                'messagesScanned': messages_scanned,
+                'spamDetected': spam_detected,
+                'lastActive': user['lastactive'].isoformat() if user['lastactive'] else None
+            })
+        
+        logger.info(f"Returning {len(users_list)} formatted users")
+        return jsonify(users_list), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting admin users: {str(e)}", exc_info=True)
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({'error': f'Error fetching users: {str(e)}'}), 200
+
+# Admin endpoints for Messages
+@app.route('/api/admin/messages', methods=['GET'])
+@token_required
+def get_admin_messages(current_user):
+    try:
+        logger.info(f"Getting admin messages for user: {current_user}")
+        
+        if current_user['role'] != 'admin':
+            logger.warning(f"Non-admin user trying to access admin messages")
+            return jsonify({'error': 'Unauthorized access'}), 403
+        
+        # Get query parameters
+        is_spam = request.args.get('isSpam', None)
+        msg_type = request.args.get('type', None)
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        
+        logger.info(f"Query params - isSpam: {is_spam}, type: {msg_type}, limit: {limit}, offset: {offset}")
+        
+        conn = get_db_connection()
+        if not conn:
+            logger.error("Database connection failed for messages")
+            return jsonify({'error': 'Database unavailable'}), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Build query
+        where_clause = "WHERE 1=1"
+        params = []
+        
+        if is_spam and is_spam != 'all':
+            where_clause += " AND m.is_spam = %s"
+            params.append(is_spam.lower() == 'true')
+        
+        if msg_type and msg_type != 'all':
+            where_clause += " AND m.type = %s"
+            params.append(msg_type)
+        
+        query = f"""
+            SELECT 
+                m.id,
+                m.content,
+                m.type,
+                m.is_spam,
+                m.confidence,
+                m.created_at,
+                u.name as user_name,
+                u.email as user_email
+            FROM messages m
+            JOIN users u ON m.user_id = u.id
+            {where_clause}
+            ORDER BY m.created_at DESC
+            LIMIT %s OFFSET %s
+        """
+        params.extend([limit, offset])
+        
+        logger.info(f"Executing messages query with params: {params}")
+        cursor.execute(query, params)
+        messages = cursor.fetchall()
+        logger.info(f"Fetched {len(messages)} messages")
+        cursor.close()
+        conn.close()
+        
+        # Format response
+        messages_list = []
+        for msg in messages:
+            messages_list.append({
+                'id': msg['id'],
+                'content': msg['content'],
+                'type': msg['type'],
+                'is_spam': msg['is_spam'],
+                'confidence': float(msg['confidence']),
+                'created_at': msg['created_at'].isoformat() if msg['created_at'] else None,
+                'user': {
+                    'name': msg['user_name'],
+                    'email': msg['user_email']
+                }
+            })
+        
+        logger.info(f"Returning {len(messages_list)} formatted messages")
+        return jsonify(messages_list), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting admin messages: {str(e)}", exc_info=True)
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({'error': f'Error fetching messages: {str(e)}'}), 200
+
+# Admin endpoints for Analytics
+@app.route('/api/admin/analytics', methods=['GET'])
+@token_required
+def get_admin_analytics(current_user):
+    try:
+        if current_user['role'] != 'admin':
+            return jsonify({'error': 'Unauthorized access'}), 403
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'error': 'Database unavailable'}), 500
+        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get overall stats
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_messages,
+                SUM(CASE WHEN is_spam = true THEN 1 ELSE 0 END) as spam_count,
+                SUM(CASE WHEN is_spam = false THEN 1 ELSE 0 END) as clean_count,
+                ROUND(CAST(AVG(confidence) AS NUMERIC) * 100, 2) as avg_confidence
+            FROM messages
+        """)
+        
+        overall = cursor.fetchone()
+        total_messages = overall['total_messages'] or 0
+        spam_count = overall['spam_count'] or 0
+        clean_count = overall['clean_count'] or 0
+        
+        detection_rate = (spam_count / total_messages * 100) if total_messages > 0 else 0
+        
+        # Get messages by period (last 30 days)
+        cursor.execute("""
+            SELECT 
+                DATE(created_at) as period,
+                COUNT(*) as total,
+                SUM(CASE WHEN is_spam = true THEN 1 ELSE 0 END) as spam_count,
+                SUM(CASE WHEN is_spam = false THEN 1 ELSE 0 END) as clean_count
+            FROM messages 
+            WHERE created_at >= NOW() - INTERVAL '30 days'
+            GROUP BY DATE(created_at)
+            ORDER BY period ASC
+        """)
+        
+        period_data = cursor.fetchall()
+        messages_by_period = []
+        for row in period_data:
+            if row:
+                messages_by_period.append({
+                    'period': row['period'].isoformat() if row['period'] else None,
+                    'total': row['total'] or 0,
+                    'spamCount': row['spam_count'] or 0,
+                    'cleanCount': row['clean_count'] or 0
+                })
+        
+        # Get accuracy by channel
+        cursor.execute("""
+            SELECT 
+                type,
+                COUNT(*) as total,
+                SUM(CASE WHEN is_spam = true THEN 1 ELSE 0 END) as spam_count,
+                ROUND(CAST(AVG(confidence) AS NUMERIC) * 100, 2) as accuracy
+            FROM messages
+            GROUP BY type
+        """)
+        
+        channel_data = cursor.fetchall()
+        accuracy_by_channel = {}
+        for row in channel_data:
+            if row:
+                accuracy_by_channel[row['type']] = float(row['accuracy']) if row['accuracy'] else 0
+        
+        cursor.close()
+        conn.close()
+        
+        analytics = {
+            'totalMessages': total_messages,
+            'spamCount': spam_count,
+            'cleanCount': clean_count,
+            'detectionRate': round(detection_rate, 2),
+            'messagesByPeriod': messages_by_period,
+            'accuracyByChannel': accuracy_by_channel,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+        
+        logger.info(f"Returning analytics: {analytics}")
+        return jsonify(analytics), 200
+        
+    except Exception as e:
+        logger.error(f"Error getting admin analytics: {str(e)}", exc_info=True)
+        return jsonify({'error': 'Error fetching analytics'}), 200
+
 def initialize_app():
-    print("🚀 Initializing Enhanced Multi-Language Spam Detection App...")
+    print(">> Initializing Enhanced Multi-Language Spam Detection App...")
     try:
         init_db()
-        print("✅ Database initialized")
+        print("[OK] Database initialized")
         
         # Try to load existing models or train new ones
         if not train_models():
-            print("⚠️  No models trained, using rule-based detection only")
+            print("[WARNING] No models trained, using rule-based detection only")
         else:
-            print("✅ ML models trained successfully")
+            print("[OK] ML models trained successfully")
         
-        print("✅ Multi-language spam detection ready!")
+        print("[OK] Multi-language spam detection ready!")
         
     except Exception as e:
-        print(f"❌ Error during initialization: {e}")
+        print(f"[ERROR] Error during initialization: {e}")
 
 if __name__ == '__main__':
     initialize_app()
     port = int(os.environ.get('PORT', 5000))
-    print(f"\n🌐 Starting server on http://0.0.0.0:{port}")
+    print(f"\n[INFO] Starting server on http://0.0.0.0:{port}")
     app.run(host='0.0.0.0', port=port, debug=True)

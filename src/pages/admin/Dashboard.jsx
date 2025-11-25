@@ -10,6 +10,7 @@ const Dashboard = () => {
     totalMessages: 0,
     spamCount: 0,
     hamCount: 0,
+    spamPercentage: 0,
     messagesByType: {
       email: 0,
       sms: 0,
@@ -21,6 +22,9 @@ const Dashboard = () => {
   });
 
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [topUsers, setTopUsers] = useState([]);
+  const [showRaw, setShowRaw] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -28,11 +32,14 @@ const Dashboard = () => {
     const fetchStats = async () => {
       try {
         setLoading(true);
+        setError(null);
         const token = localStorage.getItem("token");
         if (!token) {
           throw new Error("No auth token found");
         }
 
+        console.log("Fetching stats from:", `${API_URL}/admin/stats`);
+        
         const response = await axios.get(`${API_URL}/admin/stats`, {
           headers: {
             Authorization: `Bearer ${token}`,
@@ -40,14 +47,64 @@ const Dashboard = () => {
         });
 
         if (isMounted) {
-          setStats(response.data);
+          console.log("Dashboard stats received:", response.data);
+          // Normalize different possible API shapes to our expected shape
+          const payload = response.data || {};
+          const normalized = {
+            totalUsers: payload.totalUsers ?? payload.total_users ?? payload.totalUsersCount ?? 0,
+            totalMessages: payload.totalMessages ?? payload.total_messages ?? payload.totalMessages ?? 0,
+            spamCount: payload.spamCount ?? payload.spam_count ?? payload.spam ?? 0,
+            hamCount: payload.hamCount ?? payload.ham_count ?? payload.ham ?? 0,
+            spamPercentage: payload.spamPercentage ?? payload.spam_percentage ?? payload.spamRate ?? 0,
+            messagesByType: payload.messagesByType ?? payload.by_type ?? payload.byType ?? payload.by_type ?? { email: 0, sms: 0, social: 0 },
+            recentActivity: payload.recentActivity ?? payload.recent_activity ?? payload.recent_activity ?? [],
+            messagesByPeriod: payload.messagesByPeriod ?? payload.messages_by_period ?? payload.messagesByPeriod ?? [],
+            accuracyByChannel: payload.accuracyByChannel ?? payload.accuracy_by_channel ?? payload.accuracyByChannel ?? {},
+            // keep original payload for debugging
+            _raw: payload,
+          };
+
+          setStats(normalized);
+          // after getting stats, optionally fetch top users for a quick view
+          try {
+            const token = localStorage.getItem("token");
+            if (token) {
+              const usersResp = await axios.get(`${API_URL}/admin/users`, { headers: { Authorization: `Bearer ${token}` } });
+              const usersData = Array.isArray(usersResp.data) ? usersResp.data : usersResp.data?.data || [];
+              const top = usersData.slice().sort((a, b) => (b.messagesScanned || 0) - (a.messagesScanned || 0)).slice(0, 5);
+              setTopUsers(top);
+            }
+          } catch (err) {
+            console.warn('Failed to fetch top users for dashboard preview', err);
+          }
           setLoading(false);
         }
       } catch (error) {
         console.error("Error fetching admin stats:", error);
+        console.error("Error details:", {
+          message: error.message,
+          status: error.response?.status,
+          statusText: error.response?.statusText,
+          data: error.response?.data,
+        });
+        
         if (isMounted) {
-          toast.error("Error loading dashboard data");
+          const errorMsg = error.response?.data?.error || error.response?.data?.details || error.message || "Error loading dashboard data";
+          setError(errorMsg);
+          toast.error(errorMsg);
           setLoading(false);
+          // Set default empty stats to prevent UI crashes
+          setStats({
+            totalUsers: 0,
+            totalMessages: 0,
+            spamCount: 0,
+            hamCount: 0,
+            spamPercentage: 0,
+            messagesByType: { email: 0, sms: 0, social: 0 },
+            recentActivity: [],
+            messagesByPeriod: [],
+            accuracyByChannel: {},
+          });
         }
       }
     };
@@ -73,11 +130,38 @@ const Dashboard = () => {
     );
   }
 
-  // Calculate spam percentage
-  const spamPercentage =
-    stats.totalMessages > 0
-      ? Math.round((stats.spamCount / stats.totalMessages) * 100)
+  if (error && !stats.totalMessages) {
+    return (
+      <div className="flex justify-center items-center h-64">
+        <div className="text-center">
+          <p className="text-red-600 mb-4">{error}</p>
+          <button
+            onClick={() => window.location.reload()}
+            className="px-4 py-2 bg-primary-600 text-white rounded hover:bg-primary-700"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Ensure stats have safe values
+  const totalMessages = stats.totalMessages || 0;
+  const spamCount = stats.spamCount || 0;
+  const hamCount = stats.hamCount || 0;
+  const totalUsers = stats.totalUsers || 0;
+  const spamPercentage = stats.spamPercentage || 0;
+  const messagesByType = stats.messagesByType || { email: 0, sms: 0, social: 0 };
+  const recentActivity = stats.recentActivity || [];
+  const accuracyByChannel = stats.accuracyByChannel || {};
+
+  // Calculate type distribution percentages
+  const getTypePercentage = (type) => {
+    return totalMessages > 0
+      ? ((messagesByType[type] || 0) / totalMessages) * 100
       : 0;
+  };
 
   return (
     <div className="animate-fade-up">
@@ -93,7 +177,7 @@ const Dashboard = () => {
         <div className="hover-lift">
           <StatsCard
             title="Total Users"
-            value={stats.totalUsers}
+            value={totalUsers}
             icon={
               <svg
                 xmlns="http://www.w3.org/2000/svg"
@@ -118,7 +202,7 @@ const Dashboard = () => {
         <div className="hover-lift">
           <StatsCard
             title="Messages Scanned"
-            value={stats.totalMessages}
+            value={totalMessages}
             icon={
               <svg
                 xmlns="http://www.w3.org/2000/svg"
@@ -143,7 +227,7 @@ const Dashboard = () => {
         <div className="hover-lift">
           <StatsCard
             title="Spam Detected"
-            value={stats.spamCount}
+            value={spamCount}
             icon={
               <svg
                 xmlns="http://www.w3.org/2000/svg"
@@ -168,7 +252,7 @@ const Dashboard = () => {
         <div className="hover-lift">
           <StatsCard
             title="Spam Percentage"
-            value={`${spamPercentage}%`}
+            value={`${spamPercentage.toFixed(1)}%`}
             icon={
               <svg
                 xmlns="http://www.w3.org/2000/svg"
@@ -190,8 +274,9 @@ const Dashboard = () => {
         </div>
       </div>
 
-      {/* Message Type Distribution */}
+      {/* Message Type Distribution and Recent Activity */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+        {/* Message Type Distribution */}
         <div className="bg-white shadow rounded-lg p-6">
           <h2 className="text-lg font-medium text-gray-900 mb-6">
             Message Type Distribution
@@ -203,21 +288,19 @@ const Dashboard = () => {
               <div className="flex justify-between items-center mb-1">
                 <span className="text-sm font-medium text-gray-700">Email</span>
                 <span className="text-sm font-medium text-gray-700">
-                  {stats.messagesByType.email} messages
+                  {messagesByType.email || 0} messages
                 </span>
               </div>
               <div className="w-full bg-gray-200 rounded-full h-2.5">
                 <div
-                  className="bg-primary-600 h-2.5 rounded-full"
+                  className="bg-primary-600 h-2.5 rounded-full transition-all duration-300"
                   style={{
-                    width: `${
-                      stats.totalMessages > 0
-                        ? (stats.messagesByType.email / stats.totalMessages) *
-                          100
-                        : 0
-                    }%`,
+                    width: `${getTypePercentage("email")}%`,
                   }}
                 ></div>
+              </div>
+              <div className="text-xs text-gray-500 mt-1">
+                {getTypePercentage("email").toFixed(1)}% of total
               </div>
             </div>
 
@@ -226,20 +309,19 @@ const Dashboard = () => {
               <div className="flex justify-between items-center mb-1">
                 <span className="text-sm font-medium text-gray-700">SMS</span>
                 <span className="text-sm font-medium text-gray-700">
-                  {stats.messagesByType.sms} messages
+                  {messagesByType.sms || 0} messages
                 </span>
               </div>
               <div className="w-full bg-gray-200 rounded-full h-2.5">
                 <div
-                  className="bg-accent-500 h-2.5 rounded-full"
+                  className="bg-accent-500 h-2.5 rounded-full transition-all duration-300"
                   style={{
-                    width: `${
-                      stats.totalMessages > 0
-                        ? (stats.messagesByType.sms / stats.totalMessages) * 100
-                        : 0
-                    }%`,
+                    width: `${getTypePercentage("sms")}%`,
                   }}
                 ></div>
+              </div>
+              <div className="text-xs text-gray-500 mt-1">
+                {getTypePercentage("sms").toFixed(1)}% of total
               </div>
             </div>
 
@@ -250,21 +332,19 @@ const Dashboard = () => {
                   Social Media
                 </span>
                 <span className="text-sm font-medium text-gray-700">
-                  {stats.messagesByType.social} messages
+                  {messagesByType.social || 0} messages
                 </span>
               </div>
               <div className="w-full bg-gray-200 rounded-full h-2.5">
                 <div
-                  className="bg-warning-500 h-2.5 rounded-full"
+                  className="bg-warning-500 h-2.5 rounded-full transition-all duration-300"
                   style={{
-                    width: `${
-                      stats.totalMessages > 0
-                        ? (stats.messagesByType.social / stats.totalMessages) *
-                          100
-                        : 0
-                    }%`,
+                    width: `${getTypePercentage("social")}%`,
                   }}
                 ></div>
+              </div>
+              <div className="text-xs text-gray-500 mt-1">
+                {getTypePercentage("social").toFixed(1)}% of total
               </div>
             </div>
           </div>
@@ -276,12 +356,12 @@ const Dashboard = () => {
             Recent Activity
           </h2>
 
-          {stats.recentActivity.length > 0 ? (
-            <div className="space-y-4">
-              {stats.recentActivity.map((activity, index) => (
+          {recentActivity && recentActivity.length > 0 ? (
+            <div className="space-y-4 max-h-80 overflow-y-auto">
+              {recentActivity.map((activity, index) => (
                 <div
-                  key={index}
-                  className="flex items-start pb-4 border-b border-gray-100"
+                  key={activity.id || index}
+                  className="flex items-start pb-4 border-b border-gray-100 last:border-b-0"
                 >
                   <div
                     className={`flex-shrink-0 h-8 w-8 rounded-full flex items-center justify-center ${
@@ -324,14 +404,16 @@ const Dashboard = () => {
                   </div>
                   <div className="ml-3 flex-1">
                     <p className="text-sm font-medium text-gray-900">
-                      {activity.user.name}
+                      {activity.user?.name || "Unknown User"}
                     </p>
                     <p className="text-sm text-gray-500">
                       {activity.isSpam ? "Detected spam" : "Scanned message"} (
-                      {activity.type})
+                      {activity.type || "email"})
                     </p>
                     <p className="text-xs text-gray-400 mt-1">
-                      {new Date(activity.timestamp).toLocaleString()}
+                      {activity.timestamp
+                        ? new Date(activity.timestamp).toLocaleString()
+                        : "Unknown time"}
                     </p>
                   </div>
                 </div>
@@ -343,6 +425,83 @@ const Dashboard = () => {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Accuracy by Channel */}
+      {Object.keys(accuracyByChannel).length > 0 && (
+        <div className="bg-white shadow rounded-lg p-6">
+          <h2 className="text-lg font-medium text-gray-900 mb-6">
+            Detection Accuracy by Channel
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+            {Object.entries(accuracyByChannel).map(([channel, data]) => (
+              <div
+                key={channel}
+                className="p-4 border border-gray-200 rounded-lg"
+              >
+                <h3 className="text-sm font-medium text-gray-700 capitalize mb-3">
+                  {channel}
+                </h3>
+                <div className="space-y-2">
+                  <div className="flex justify-between">
+                    <span className="text-xs text-gray-600">Total:</span>
+                    <span className="text-sm font-medium text-gray-900">
+                      {data.total || 0}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-xs text-gray-600">Spam Count:</span>
+                    <span className="text-sm font-medium text-danger-600">
+                      {data.spam_count || 0}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-xs text-gray-600">Accuracy:</span>
+                    <span className="text-sm font-medium text-success-600">
+                      {(data.accuracy || 0).toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Top Users */}
+      <div className="bg-white shadow rounded-lg p-6 mb-8">
+        <h2 className="text-lg font-medium text-gray-900 mb-4">Top Users (by messages scanned)</h2>
+        {topUsers && topUsers.length > 0 ? (
+          <div className="space-y-3">
+            {topUsers.map((u) => (
+              <div key={u.id} className="flex items-center justify-between border-b pb-3">
+                <div>
+                  <div className="font-medium">{u.name || u.email}</div>
+                  <div className="text-xs text-gray-500">{u.email}</div>
+                </div>
+                <div className="text-sm text-gray-700">{u.messagesScanned || 0} messages</div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="text-gray-500">No top users data available</div>
+        )}
+      </div>
+
+      {/* Raw payload view for verification */}
+      <div className="bg-white shadow rounded-lg p-4 mb-8">
+        <button
+          onClick={() => setShowRaw((s) => !s)}
+          className="px-3 py-1 text-sm bg-gray-100 border rounded text-gray-700 hover:bg-gray-200"
+        >
+          {showRaw ? 'Hide payload' : 'Show raw payload'}
+        </button>
+
+        {showRaw && (
+          <pre className="mt-3 max-h-96 overflow-auto text-xs bg-gray-50 p-3 rounded border">
+            {JSON.stringify({ raw: stats._raw ?? stats, normalized: stats }, null, 2)}
+          </pre>
+        )}
       </div>
     </div>
   );
