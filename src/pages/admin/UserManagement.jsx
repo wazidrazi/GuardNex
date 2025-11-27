@@ -194,7 +194,7 @@ const UserManagement = () => {
 
   return (
     <div className="min-h-screen">
-      <div className="">
+      <div className="p-8">
         {/* Header */}
         <div className="mb-8">
           <div className="flex items-center gap-3 mb-2">

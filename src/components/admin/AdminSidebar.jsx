@@ -283,17 +283,7 @@ const AdminSidebar = () => {
           )}
         </div>
 
-        <div className="mt-6 px-4">
-          <div
-            className={`${
-              (isOpen && !isMobile) || isMobile ? "block" : "hidden"
-            } mb-6 px-4`}
-          >
-            <h2 className="text-xs tracking-wider uppercase text-gray-400 font-semibold">
-              Main Menu
-            </h2>
-          </div>
-        </div>
+        
 
         <nav className="mt-2 px-2">
           {navItems.map((item) => {
