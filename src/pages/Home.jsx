@@ -12,10 +12,10 @@ const Home = () => {
   const statsRef = useRef(null)
   
   // Stats values
-  const targetAccuracy = 99.2
-  const targetMessages = 15
+  const targetAccuracy = 92.2
+  const targetMessages = 3.5
   const targetHours = 24
-  const targetUsers = 10
+  const targetUsers = 300
 
   useEffect(() => {
     setIsVisible(true)
@@ -116,13 +116,13 @@ const Home = () => {
       
         <div className="container mx-auto px-4 sm:px-6 lg:px-8 flex-grow flex flex-col justify-center">
           <div className="max-w-4xl mx-auto text-center">
-            <span className="inline-block px-4 py-1 rounded-full bg-primary-50 text-primary-600 font-medium text-sm mb-6 animate-fade-in">Advanced AI Technology</span>
-            <h1 className="text-4xl sm:text-5xl md:text-6xl font-extrabold tracking-tight">
+            <span className="inline-block px-4 py-1 rounded-full bg-primary-50 text-primary-600 font-medium text-sm mb-6 animate-fade-in">Advanced Spam Detection</span>
+            <h1 className="text-3xl md:text-5xl font-bold tracking-tight">
               <span className="block mb-2 text-gray-900">Protect Yourself from</span>
               <span className="bg-gradient-to-r from-primary-600 via-primary-500 to-accent-500 bg-clip-text text-transparent">Unwanted Spam</span>
             </h1>
-            <p className="mt-6 text-xl text-gray-600 max-w-3xl mx-auto leading-relaxed">
-              Our AI-powered spam detection system helps you identify and filter unwanted messages with industry-leading accuracy.
+            <p className="mt-6 text-xl text-gray-600 max-w-4xl mx-auto leading-relaxed">
+              GueardNex helps you identify and filter spam messages across emails, SMS and social media with high accuracy. Stay safe and focused with real-time, multilingual message protection.
             </p>
             <div className="mt-10">
               {isAuthenticated ? (
@@ -190,7 +190,7 @@ const Home = () => {
                   </svg>
                 </div>
                 <div className="text-3xl sm:text-4xl font-bold text-accent-600 mb-2">
-                  {messagesCount.toFixed(1)}M+
+                  {messagesCount.toFixed(1)}k+
                 </div>
                 <div className="text-sm font-medium text-gray-500">Messages Analyzed</div>
               </div>
@@ -212,7 +212,7 @@ const Home = () => {
                   </svg>
                 </div>
                 <div className="text-3xl sm:text-4xl font-bold text-accent-600 mb-2">
-                  {usersCount.toFixed(1)}K+
+                  {usersCount.toFixed(1)}
                 </div>
                 <div className="text-sm font-medium text-gray-500">Users Protected</div>
               </div>

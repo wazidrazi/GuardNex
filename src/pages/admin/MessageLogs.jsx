@@ -180,8 +180,8 @@ const MessageLogs = () => {
   return (
     <div className="px-6">
       <div className="mb-6">
-        <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">Message Logs</h1>
-        <p className="text-gray-600 mt-1">View history of all scanned messages</p>
+        <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent pb-2">Message Logs</h1>
+        <p className="text-gray-600">View history of all scanned messages</p>
       </div>
 
       <DataTable
