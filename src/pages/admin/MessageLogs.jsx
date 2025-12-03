@@ -178,9 +178,11 @@ const MessageLogs = () => {
   const [selectedMessage, setSelectedMessage] = useState(null);
 
   return (
-    <div className="px-6">
+    <div className="">
       <div className="mb-6">
-        <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent pb-2">Message Logs</h1>
+        <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent pb-2">
+          Message Logs
+        </h1>
         <p className="text-gray-600">View history of all scanned messages</p>
       </div>
 
