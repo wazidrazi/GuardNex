@@ -1300,6 +1300,46 @@ def get_admin_messages(current_user):
         logger.error(f"Traceback: {traceback.format_exc()}")
         return jsonify({'error': f'Error fetching messages: {str(e)}'}), 200
 
+@app.route('/api/admin/messages/<int:message_id>', methods=['DELETE'])
+@token_required
+def delete_admin_message(current_user, message_id):
+    try:
+        logger.info(f"Delete message request for ID: {message_id} by user: {current_user}")
+        
+        if current_user['role'] != 'admin':
+            logger.warning(f"Non-admin user trying to delete message")
+            return jsonify({'error': 'Unauthorized access'}), 403
+        
+        conn = get_db_connection()
+        if not conn:
+            logger.error("Database connection failed for delete message")
+            return jsonify({'error': 'Database unavailable'}), 500
+        
+        cursor = conn.cursor()
+        
+        # Check if message exists
+        cursor.execute("SELECT id FROM messages WHERE id = %s", (message_id,))
+        if not cursor.fetchone():
+            logger.warning(f"Message {message_id} not found")
+            cursor.close()
+            conn.close()
+            return jsonify({'error': 'Message not found'}), 404
+        
+        # Delete the message
+        cursor.execute("DELETE FROM messages WHERE id = %s", (message_id,))
+        conn.commit()
+        
+        logger.info(f"Message {message_id} deleted successfully")
+        cursor.close()
+        conn.close()
+        
+        return jsonify({'message': 'Message deleted successfully'}), 200
+        
+    except Exception as e:
+        logger.error(f"Error deleting message: {str(e)}", exc_info=True)
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return jsonify({'error': f'Error deleting message: {str(e)}'}), 500
+
 # Admin endpoints for Analytics
 @app.route('/api/admin/analytics', methods=['GET'])
 @token_required
