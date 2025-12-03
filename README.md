@@ -1,6 +1,4 @@
 # GuardNex - Advanced Multilingual Spam Detection Platform
-# GuardNex - Multilingual, Multi-Platform Spam Detection System
-
 
 Spam attacks just keep getting smarter. They jump between languages and platforms, trying to sneak past the usual filters. That’s where GuardNex comes in. It’s a spam detection system that handles English, Spanish, and Bangla—and it doesn’t care if the spam lands in texts, emails, or WhatsApp chats.
 

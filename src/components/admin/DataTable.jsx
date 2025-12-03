@@ -208,13 +208,11 @@ const DataTable = ({
                       column.sortable !== false ? "cursor-pointer group" : ""
                     }`}
                     onClick={() =>
-                      column.sortable !== false &&
-                      requestSort(column.accessor)
+                      column.sortable !== false && requestSort(column.accessor)
                     }
                   >
                     {column.Header}
-                    {column.sortable !== false &&
-                      getSortIcon(column.accessor)}
+                    {column.sortable !== false && getSortIcon(column.accessor)}
                   </div>
                 </th>
               ))}
@@ -301,8 +299,8 @@ const DataTable = ({
       {pagination && totalItems > 0 && (
         <div className="bg-gray-50 px-4 py-4 border-t flex flex-col sm:flex-row justify-between items-center gap-4">
           <div className="text-sm text-gray-600">
-            Showing <b>{startItem}</b>–<b>{endItem}</b> of{" "}
-            <b>{totalItems}</b> results
+            Showing <b>{startItem}</b>–<b>{endItem}</b> of <b>{totalItems}</b>{" "}
+            results
           </div>
 
           <div className="flex items-center gap-4">
