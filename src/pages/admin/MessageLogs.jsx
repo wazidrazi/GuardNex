@@ -268,7 +268,7 @@ const MessageLogs = () => {
                 onClick={() => setShowViewModal(false)}
                 className="text-gray-500"
               >
-                Close
+                <X className="w-5 h-5" />
               </button>
             </div>
 
